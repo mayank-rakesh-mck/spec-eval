@@ -44,8 +44,8 @@ class GPQABenchmarker(Benchmarker):
     """The ``Idavidrein/gpqa`` dataset is gated on HF; ``huggingface-cli login``
     first. SpecForge uses the ``gpqa_main`` config."""
 
-    def __init__(self, num_samples: Optional[int] = None, subset=None):
-        super().__init__(num_samples, subset)
+    def __init__(self, num_samples: Optional[int] = None, subset=None, seed: int = 0):
+        super().__init__(num_samples, subset, seed)
 
     def load_data(self) -> Tuple[List[Dict[str, Any]], List[str]]:
         # Deterministic gold-letter shuffle per run.

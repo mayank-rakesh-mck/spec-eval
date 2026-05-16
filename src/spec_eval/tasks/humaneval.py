@@ -53,8 +53,8 @@ def _check_correctness(code: str, test_code: str, entry_point: str) -> bool:
 class HumanEvalBenchmarker(Benchmarker):
     """164 problems; exec-based pass@1."""
 
-    def __init__(self, num_samples: Optional[int] = None, subset=None):
-        super().__init__(num_samples, subset)
+    def __init__(self, num_samples: Optional[int] = None, subset=None, seed: int = 0):
+        super().__init__(num_samples, subset, seed)
 
     def load_data(self) -> Tuple[List[Dict[str, Any]], List[Optional[Dict[str, str]]]]:
         ds = load_dataset("openai/openai_humaneval")["test"]

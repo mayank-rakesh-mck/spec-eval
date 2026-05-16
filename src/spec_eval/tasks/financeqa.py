@@ -32,8 +32,8 @@ def _question_text(row: Dict[str, Any]) -> str:
 class FinanceQABenchmarker(Benchmarker):
     SHOW_ACCURACY = False
 
-    def __init__(self, num_samples: Optional[int] = None, subset=None):
-        super().__init__(num_samples, subset)
+    def __init__(self, num_samples: Optional[int] = None, subset=None, seed: int = 0):
+        super().__init__(num_samples, subset, seed)
 
     def load_data(self) -> Tuple[List[Dict[str, Any]], List[Optional[str]]]:
         ds = load_dataset("AfterQuery/FinanceQA")["test"]

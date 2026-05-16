@@ -17,8 +17,8 @@ from spec_eval.tasks.base import Benchmarker
 class SimpleQABenchmarker(Benchmarker):
     SHOW_ACCURACY = False  # SimpleQA's official scorer is LLM-judge based
 
-    def __init__(self, num_samples: Optional[int] = None, subset=None):
-        super().__init__(num_samples, subset)
+    def __init__(self, num_samples: Optional[int] = None, subset=None, seed: int = 0):
+        super().__init__(num_samples, subset, seed)
 
     def load_data(self) -> Tuple[List[Dict[str, Any]], List[Optional[str]]]:
         ds = load_dataset("basicv8vc/SimpleQA")["test"]

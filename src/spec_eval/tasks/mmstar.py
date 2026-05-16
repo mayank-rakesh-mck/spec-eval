@@ -43,8 +43,8 @@ class MMStarBenchmarker(Benchmarker):
     REQUIRES_VISION = True
     LANGUAGE = "multi"
 
-    def __init__(self, num_samples: Optional[int] = None, subset=None):
-        super().__init__(num_samples, subset)
+    def __init__(self, num_samples: Optional[int] = None, subset=None, seed: int = 0):
+        super().__init__(num_samples, subset, seed)
         self.cache_dir: Optional[str] = None
         self.options_list: List[List[str]] = []
 
