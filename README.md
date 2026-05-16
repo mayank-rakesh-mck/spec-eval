@@ -22,7 +22,6 @@ Full glossary in [§ Metrics reference](#metrics-reference).
 
 ## Table of contents
 
-- [What's new vs SpecForge / the old `eval.py`](#whats-new-vs-specforge--the-old-evalpy)
 - [Quick start](#quick-start)
 - [Makefile](#makefile)
 - [EAGLE-3 support](#eagle-3-support)
@@ -33,31 +32,6 @@ Full glossary in [§ Metrics reference](#metrics-reference).
 - [Concurrency](#concurrency)
 - [Architecture](#architecture)
 - [Notes](#notes)
-
----
-
-## What's new vs SpecForge / the old `eval.py`
-
-| Feature | spec-eval | SpecForge `bench_eagle3.py` | old `eval.py` |
-| --- | :-: | :-: | :-: |
-| EAGLE-2 + EAGLE-3 in one CLI | ✓ | EAGLE-3 only | EAGLE-2 only |
-| Auto-detect algorithm from drafter | ✓ | — | — |
-| Algo-aware spec defaults (5/8/64 vs 3/1/4) | ✓ | — | — |
-| `--config-list` multi-cell sweep | ✓ | ✓ | — |
-| Async client (`--concurrency N`) | ✓ | — | — |
-| Resume / skip-if-done + `--force` | ✓ | — | ✓ |
-| Vocab guard pre-flight | ✓ | — | ✓ |
-| Sanity checks (repetition, prompt-echo, system-leak) | ✓ | — | ✓ |
-| Task accuracy reporting | ✓ | ✓ | — |
-| Per-prompt distribution stats (p50/p90 of accept_length) | ✓ | — | ✓ |
-| Both RoS + MoR α estimators reported | ✓ | — | ✓ |
-| Cache hit-rate, retractions, queue-time percentiles | ✓ | — | — |
-| `/server_info` step_time p20 + effective speed | ✓ | ✓ | — |
-| Drafter SHA256 in provenance | ✓ | — | ✓ |
-| Server-log tail on boot failure | ✓ | — | ✓ |
-| `spec-eval report` (markdown) | ✓ | — | — |
-| `spec-eval compare` (speedup table) | ✓ | — | — |
-| Lean eval venv (no `import sglang`) | ✓ | — | ✓ |
 
 ---
 
