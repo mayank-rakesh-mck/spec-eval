@@ -1,0 +1,43 @@
+[project]
+name = "spec-eval"
+version = "0.1.0"
+description = "EAGLE-2 speculative-decoding eval pipeline for SGLang. Mirrors the SpecForge benchmarker pattern but talks to SGLang over HTTP /generate so the eval venv stays lean."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "spec-eval" }]
+license = { text = "Apache-2.0" }
+
+dependencies = [
+    "datasets>=2.16.0",
+    "transformers>=4.40.0",
+    "httpx>=0.27.0",
+    "numpy>=1.24",
+    "tqdm>=4.66",
+    "pyyaml>=6.0",
+    "rich>=13.7",
+]
+
+[project.optional-dependencies]
+# sglang is installed separately because flashinfer + torch wheels are
+# CUDA/version-specific. On a GPU box:
+#   uv pip install "sglang[all]>=0.5"
+# We deliberately do NOT pin it here so `uv sync` works on a dev box.
+sglang = ["sglang[all]>=0.5"]
+
+# Untrusted-code exec for HumanEval / LiveCodeBench gets sandboxed via subprocess;
+# `human-eval` adds the official pass@k harness if you want stricter scoring.
+codeeval = ["human-eval>=1.0"]
+
+[project.scripts]
+spec-eval = "spec_eval.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/spec_eval"]
+
+[tool.uv]
+# Lock against PyPI; sglang is left out of the default sync (see above).
+package = true

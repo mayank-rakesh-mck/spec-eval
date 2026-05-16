@@ -1,0 +1,23 @@
+# venv + uv
+.venv/
+.uv-cache/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# build artefacts
+*.egg-info/
+build/
+dist/
+
+# eval outputs
+results/
+.cache/
+logs/
+*.log
+
+# editor
+.vscode/
+.idea/
+.DS_Store
