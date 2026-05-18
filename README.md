@@ -31,6 +31,8 @@ Full glossary in [§ Metrics reference](#metrics-reference).
 - [Output layout](#output-layout)
 - [Concurrency](#concurrency)
 - [Architecture](#architecture)
+- [Glossary](#glossary)
+- [Contributing](#contributing)
 - [Notes](#notes)
 
 ---
@@ -160,8 +162,10 @@ uv run spec-eval --help
 # Subcommands:
 #   run         Boot SGLang + run benchmarks
 #   report      Render markdown report from a run dir
-#   compare     Side-by-side diff of two runs
+#   compare     Side-by-side diff of two runs (with paired Wilcoxon)
 #   audit       Inspect a draft (algo + vocab + defaults)
+#   doctor      Preflight env health check (Python, CUDA, sglang, ports, disk)
+#   status      Snapshot a run-dir's progress (in-flight / done / not-started)
 #   list-tasks  Print known benchmark names
 ```
 
@@ -178,16 +182,23 @@ uv run spec-eval run \
   --concurrency 8 \            # async /generate pool
   --config-list 1,0,0,0 1,5,8,64 1,3,1,4 \   # baseline + EAGLE-2 + EAGLE-3
   --force \                    # overwrite finished cells
+  --skip-if-exists \           # short-circuit if signature matches a prior run
   --dry-run                    # print plan, don't execute
 ```
 
 ### `report` / `compare`
 
 ```bash
-uv run spec-eval report results/<run-dir>          # writes results/<run-dir>/report.md
-uv run spec-eval report results/<run-dir> --print  # also print to stdout
+uv run spec-eval report results/<run-dir>                    # writes results/<run-dir>/report.md
+uv run spec-eval report results/<run-dir> --print            # also print to stdout
+uv run spec-eval report results/<run-dir> --pareto-csv f.csv # flat (run, cell, task, AL, tps, …) CSV
 uv run spec-eval compare results/<baseline> results/<spec> --print
+uv run spec-eval compare results/<baseline> results/<spec> --pareto-csv both.csv
 ```
+
+`compare` includes a **paired Wilcoxon signed-rank test** on per-prompt
+throughput (joins both runs by prompt position under a fixed seed), so
+"the speedup is 1.18×" becomes "the speedup is 1.18× and `p < 0.01`".
 
 ### `audit`
 
@@ -201,6 +212,48 @@ uv run spec-eval audit \
 # defaults: num_steps=3  topk=1  draft_tokens=4
 # vocab   : vocab OK: 128256 (target == draft)
 ```
+
+### `doctor`
+
+Runs a preflight environment health check — Python version, key Python
+deps, `CUDA_HOME`, `nvcc` on PATH, `curand_kernel.h` (the FlashInfer JIT
+trap), `torch.cuda.is_available()`, sglang import, HF token, port free,
+disk free. Exits non-zero on any failure.
+
+```bash
+uv run spec-eval doctor                        # human output
+uv run spec-eval doctor --json | jq            # machine-readable
+uv run spec-eval doctor --port 30001           # check a non-default port
+```
+
+### `status`
+
+Snapshot the progress of an in-flight or finished run dir — counts
+completed vs in-flight vs not-started task cells, shows the run
+signature, and lists server log paths. Useful when a long sweep is
+running in another shell.
+
+```bash
+uv run spec-eval status results/<run-dir>
+uv run spec-eval status results/<run-dir> --json
+```
+
+### Sweeps (Makefile shortcuts)
+
+```bash
+# Tree topology sweep (steps × topk × draft_tokens)
+make run-tree-sweep TARGET=... DRAFT=... \
+    TREE_TUPLES="1,3,4,16 1,5,8,64 1,7,8,64 1,5,16,128"
+
+# Per-batch-size sweep at the EAGLE-2 default tree
+make run-bs-sweep TARGET=... DRAFT=... \
+    BS_TUPLES="1,5,8,64 2,5,8,64 4,5,8,64 8,5,8,64"
+```
+
+Tuple format is `batch_size,num_steps,topk,draft_tokens` (SpecForge
+convention). A pure baseline cell is `bs,0,0,0`. Both sweep targets
+reboot the SGLang server per cell automatically — one CLI invocation
+gives you the full grid.
 
 ---
 
@@ -275,10 +328,11 @@ Wall-clock and percentiles from `meta_info`:
 
 | Field | Unit | Definition |
 | --- | --- | --- |
-| `e2e_latency_p50` / `e2e_latency_p90` | seconds | SGLang's end-to-end request latency (queue + prefill + decode). |
+| `e2e_latency_p50` / `e2e_latency_p90` / `e2e_latency_p99` | seconds | SGLang's end-to-end request latency (queue + prefill + decode). |
 | `inference_time_p50` | seconds | Compute-only time, excludes queueing. |
 | `queue_time_p50` | seconds | Time spent waiting for the GPU. With `--concurrency > 1` this is your batching headroom. |
 | `decode_throughput_p50` / `decode_throughput_p90` | tokens/sec | Per-request decode-phase TPS (`completion_tokens / inference_time`). |
+| `itl_ms_p50` / `itl_ms_p90` / `itl_ms_p99` | ms / generated token | Inter-token latency: per-prompt `(inference_time / completion_tokens) × 1000`, then percentiles across prompts. **Spec-decode can hurt this while helping `output_throughput`** — extra draft step per accept. Surface both to avoid the throughput-tail-latency trade-off going unnoticed. |
 
 Server-side step time, from `/server_info.step_time_dict`:
 
@@ -294,6 +348,59 @@ Server-side step time, from `/server_info.step_time_dict`:
 | `cached_tokens_sum` | int | Total prompt tokens served from radix cache. |
 | `cache_hit_rate` | fraction | `cached_tokens_sum / prompt_tokens_sum`. The runner calls `/flush_cache` between tasks so this doesn't leak across cells. |
 | `total_retractions` | int | SGLang request-retraction count (KV-cache pressure / OOM-avoidance). A non-zero value flags that memory was tight; try `--mem-fraction-static 0.80`. |
+
+### Statistical uncertainty
+
+Point estimates lie. Every cell-level mean is shipped alongside a
+non-parametric percentile-bootstrap 95% CI (n=2000 resamples):
+
+| Field | Shape | Definition |
+| --- | --- | --- |
+| `accept_length_ci` | `{point, lo, hi, n}` | 95% CI of per-prompt `completion / verify_ct`. `point` equals the MoR estimator (mean of per-prompt ratios). Bootstrapped from the per-prompt sample, not from re-running the eval. |
+| `output_throughput_ci` | `{point, lo, hi, n}` | 95% CI of per-prompt tok/s (`completion_tokens / inference_time`). |
+
+CIs are only populated when there are ≥ 5 per-prompt observations
+(anything smaller is statistical theatre).
+
+`spec-eval compare` runs a **paired two-sided Wilcoxon signed-rank
+test** on per-prompt throughput between two runs (joining by prompt
+position under a fixed seed). The `compare` markdown emits one row
+per task with the test statistic, z-score, p-value, median Δ, effect
+direction, and a ✓ at `p < 0.05`. No scipy dependency — implemented
+inline with tie + zero corrections + normal approximation.
+
+### Cross-task aggregation
+
+`render_run` adds a "cross-task aggregation" table that summarises a
+cell across *all* its tasks:
+
+| Field | Aggregation | Why |
+| --- | --- | --- |
+| `throughput_geomean` | geometric mean over tasks | Throughput is a ratio; arithmetic mean would over-weight whichever task happened to produce the most tokens. Geomean is the correct average for ratios. |
+| `accept_length_mean` | arithmetic mean over tasks | Counts of tokens are additive; arithmetic mean is fine here. |
+| `itl_ms_harmean` | harmonic mean over tasks | ITL is `1/rate`; harmonic mean of `1/rate` ⇔ arithmetic mean of `rate`, the right summary for ms/tok. |
+
+### Pareto frontier export
+
+`spec-eval report --pareto-csv pareto.csv` (or
+`spec-eval compare --pareto-csv both.csv`) emits a flat CSV with one
+row per `(run, cell, task)`:
+
+```
+run,cell,task,accept_length,output_throughput,accuracy,itl_ms_p50,alpha_per_token,spec_decode_active
+```
+
+Drop into pandas / matplotlib to draw the speedup × acceptance Pareto
+frontier across a sweep:
+
+```python
+import pandas as pd, matplotlib.pyplot as plt
+df = pd.read_csv("pareto.csv")
+for spec, sub in df.groupby("spec_decode_active"):
+    plt.scatter(sub["accept_length"], sub["output_throughput"],
+                label=f"spec={spec}")
+plt.xlabel("accept_length"); plt.ylabel("tok/s"); plt.legend()
+```
 
 ### Sanity flags
 
@@ -374,7 +481,7 @@ batch on the server side.
 
 ```
 spec_eval/
-├── cli.py            # subcommands: run / report / compare / audit / list-tasks
+├── cli.py            # subcommands: run / report / compare / audit / doctor / status / list-tasks
 ├── runner.py         # EvalRun, CellConfig, EvalConfig — boots server, iterates cells
 ├── server.py         # SGLang lifecycle (subprocess, EAGLE/EAGLE3 args)
 ├── client.py         # SGLangClient (sync) + AsyncSGLangClient (concurrency)
@@ -382,7 +489,9 @@ spec_eval/
 ├── guards.py         # vocab_guard + config-tuple parsing
 ├── sanity.py         # rule-based response QC flags
 ├── metrics.py        # BenchmarkMetrics + compute_metrics + print_results
-├── report.py         # markdown rendering for report / compare subcommands
+├── stats.py          # bootstrap CIs, paired Wilcoxon, geomean/harmean, run_signature
+├── ops.py            # `doctor` + `status` subcommands (no GPU import)
+├── report.py         # markdown rendering for report / compare + Pareto CSV
 ├── registry.py       # @BENCHMARKS.register decorator
 ├── utils.py          # chat-template + cached downloads
 └── tasks/
@@ -392,16 +501,96 @@ spec_eval/
     └── math500.py  mmlu.py  mmstar.py  mtbench.py  simpleqa.py
 
 scripts/
+├── setup_cuda_env.sh # idempotent CUDA toolchain bootstrap (conda + symlinks)
 └── smoke_test.py     # offline assertions over metrics/sanity/report (no GPU)
 
 archive/
 └── eval.py           # the original SpecForge-style script (kept for reference)
 ```
 
-The eval venv has **no `import sglang`** anywhere — sglang lives behind the
-`sglang.launch_server` subprocess and is reached over HTTP. That keeps
-`uv sync` working on a dev box without CUDA/FlashInfer wheels, and lets you
-upgrade sglang independently of the eval pipeline.
+### Data flow
+
+```mermaid
+flowchart LR
+    A[spec-eval CLI] --> B[EvalRun]
+    B --> C{cell loop}
+    C -->|per cell| D[server.launch<br/>subprocess: sglang.launch_server]
+    D -->|HTTP /generate| E[AsyncSGLangClient<br/>or SGLangClient]
+    E -->|httpx pool| D
+    C -->|per task| F[Benchmarker<br/>tasks/*.py]
+    F -->|prompts + chat template| E
+    F -->|rows| G[compute_metrics<br/>+ sanity flags]
+    G -->|server_info| D
+    G --> H[metrics.json<br/>requests.jsonl]
+    B --> I[summary.json<br/>+ config.json + run_signature]
+    H --> J[report.py]
+    I --> J
+    J --> K[report.md<br/>+ pareto.csv]
+```
+
+Three boundaries that matter:
+
+1. **The eval venv has no `import sglang`.** sglang lives behind the
+   `sglang.launch_server` subprocess and is reached over HTTP. `uv sync`
+   works on a CPU dev box; `uv pip install 'sglang[all]'` only happens
+   on GPU. Upgrade sglang independently of the eval pipeline.
+2. **Per-cell server reboot.** A cell is `(task, spec_config, seed)`.
+   Spec hyperparameters (`num_steps`, `topk`, `draft_tokens`, `bs`) are
+   baked into the server boot — sweeping the topology requires
+   relaunching SGLang. The runner does this for you.
+3. **Client-side chat templating.** We call SGLang's `/generate` with a
+   pre-templated string (using `AutoTokenizer.apply_chat_template`),
+   not OpenAI-style messages, so the template applied is exactly the
+   target model's — no SGLang frontend "default" template surprises.
+
+---
+
+## Glossary
+
+| Term | Definition |
+| --- | --- |
+| **Target model** | The model whose outputs we want — typically a 7B/8B/70B chat-tuned LM. Spec-decoding accelerates *its* generation. |
+| **Draft / drafter model** | A small, fast model that proposes candidate tokens. For EAGLE the drafter sits on top of the target's hidden states; for EAGLE-3 it consumes auxiliary hidden states. |
+| **EAGLE-2** | Tree-based speculative decoding. SGLang defaults: `num_steps=5, topk=8, draft_tokens=64`. |
+| **EAGLE-3** | Variant that uses auxiliary hidden states and a shallower tree. Defaults: `num_steps=3, topk=1, draft_tokens=4`. |
+| **Cell** | One `(spec_config, seed)` combination. A run iterates the cartesian product of cells × tasks. Each cell forces a server reboot. |
+| **`num_steps`** | Max depth of the draft tree per verify step (how many draft tokens at most before the target verifies). |
+| **`eagle_topk`** | Branching factor of the draft tree. EAGLE-3 collapses this to 1 (linear chain) by default. |
+| **`draft_tokens`** | Total candidates considered across the tree per verify step. |
+| **`accept_length`** | `completed_tokens / verify_steps`. Higher is better. The headline acceptance metric. |
+| **Leviathan α** | Per-drafter-token acceptance probability ≈ `(accept_length − 1) / num_steps`. Comparable across drafters at fixed `num_steps`. |
+| **`α_normalized`** | `accept_length / (num_steps + 1)`. Fraction of ideal speedup realised. |
+| **Tree accept rate** | `spec_accept_token_num / spec_draft_token_num`. Naturally low because most tree branches get culled — *not* Leviathan's α. |
+| **RoS vs MoR** | Ratio-of-sums vs mean-of-ratios. RoS = `Σnum/Σden` (unbiased, what papers report). MoR = `mean(num_p/den_p)` (biased toward short prompts, diagnostic). |
+| **Verify step** | One server-side step where the target evaluates the drafter's candidates. `accept_length` is averaged across these. |
+| **Step time p20** | 20th-percentile per-step decode wall-time at the current batch size (from `/server_info`). SpecForge's preferred "raw server speed" metric — robust to first-step warm-up. |
+| **Effective speed** | `(1000 / step_time_p20_ms) × accept_length`. Server-side speed × acceptance — the apples-to-apples speedup number. |
+| **ITL (inter-token latency)** | Per-token decode time: `(inference_time / completion_tokens) × 1000` ms. Spec-decode can hurt this while helping `tok/s`. |
+| **TPS / `output_throughput`** | End-to-end tokens/sec including queueing. The headline throughput. |
+| **`/generate`** | SGLang's HTTP endpoint we call per prompt. Returns the response plus `meta_info` with all spec-decode counters. |
+| **`/server_info`** | SGLang endpoint exposing internal state — used for `step_time_p20_ms` and `cache_hit_rate`. |
+| **Run signature** | 12-char SHA256 of `(target, draft, drafter_sha256, algorithm, tasks, cells, seeds, N)`. Stamped in `config.json`; used by `--skip-if-exists` to dedup identical re-invocations. |
+| **Drafter SHA256** | SHA256 of `<draft>/model.safetensors` (when the drafter is a local dir). Pins the actual weight bytes, catches silent overwrites. |
+| **Sanity flag** | One of 5 cheap rule-based response checks (`too_short`, `repetition`, `prompt_echo`, `system_leak`, `generation_empty`). High `insane_fraction` ⇒ template bug or wrong drafter family. |
+| **Bootstrap CI** | Percentile-bootstrap 95% confidence interval (n=2000 resamples). Non-parametric — no distributional assumption. |
+| **Paired Wilcoxon** | Non-parametric paired test on per-prompt throughput. Joins runs by prompt position under a fixed seed. |
+| **Vocab guard** | Pre-flight check that `target.vocab_size == draft.vocab_size` (EAGLE) — mismatch ⇒ silent garbage at inference, so we fail loudly. |
+| **`config_list` tuple** | `batch_size,num_steps,eagle_topk,draft_tokens`. SpecForge convention. `bs,0,0,0` is a baseline cell. |
+
+---
+
+## Contributing
+
+Adding a new benchmark takes ~30 lines. See [`CONTRIBUTING.md`](CONTRIBUTING.md)
+for the full walk-through; the short version:
+
+1. Create `src/spec_eval/tasks/<name>.py` subclassing
+   `spec_eval.tasks.base.Benchmarker`.
+2. Implement `prepare_messages()` to yield `(user_messages, answer_key,
+   meta)` triples, and (if gradable) `score_one()`.
+3. Decorate with `@BENCHMARKS.register("<name>")` — that's it; the CLI
+   picks it up automatically and `make smoke-test` will exercise the
+   metric plumbing.
 
 ---
 
@@ -417,3 +606,6 @@ upgrade sglang independently of the eval pipeline.
 - **Step-time metric** requires `SGLANG_RECORD_STEP_TIME=1`; the runner sets
   this automatically. If `step_time_p20_ms` is `None` in `metrics.json`, your
   SGLang build is too old or the env var was overridden.
+- **`spec-eval doctor`** is the first thing to run on a fresh box —
+  catches the CUDA / FlashInfer / port-busy traps before you wait 2
+  minutes for an SGLang boot.
