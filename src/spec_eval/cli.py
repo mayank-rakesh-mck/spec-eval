@@ -21,7 +21,13 @@ from typing import Any, Dict, List, Optional
 from spec_eval.algo_detect import defaults_for, detect_algorithm
 from spec_eval.guards import vocab_guard
 from spec_eval.registry import BENCHMARKS
-from spec_eval.report import write_compare, write_report, render_run, render_compare
+from spec_eval.report import (
+    render_compare,
+    render_run,
+    write_compare,
+    write_pareto_csv,
+    write_report,
+)
 from spec_eval.runner import (
     EvalConfig,
     EvalRun,
@@ -101,6 +107,14 @@ def _add_run_args(p: argparse.ArgumentParser) -> None:
     bench.add_argument("--run-name", default=None)
     bench.add_argument("--force", action="store_true", help="overwrite finished cells")
     bench.add_argument(
+        "--skip-if-exists",
+        action="store_true",
+        help=(
+            "if a finished run with the same (target, draft, tasks, cells, seeds, "
+            "num_samples) exists under --output-dir, reuse it instead of re-running"
+        ),
+    )
+    bench.add_argument(
         "--concurrency",
         type=int,
         default=1,
@@ -135,6 +149,12 @@ def _build_parser() -> argparse.ArgumentParser:
     rep_p.add_argument("run_dir", type=Path)
     rep_p.add_argument("--output", type=Path, default=None)
     rep_p.add_argument("--print", action="store_true", help="also print to stdout")
+    rep_p.add_argument(
+        "--pareto-csv",
+        type=Path,
+        default=None,
+        help="also write a flat (run, cell, task, accept_length, throughput, …) CSV",
+    )
     _add_common_logging(rep_p)
 
     # compare
@@ -143,6 +163,12 @@ def _build_parser() -> argparse.ArgumentParser:
     cmp_p.add_argument("spec_dir", type=Path)
     cmp_p.add_argument("--output", type=Path, default=None)
     cmp_p.add_argument("--print", action="store_true")
+    cmp_p.add_argument(
+        "--pareto-csv",
+        type=Path,
+        default=None,
+        help="write a flat CSV with rows from BOTH runs for Pareto plotting",
+    )
     _add_common_logging(cmp_p)
 
     # audit
@@ -220,6 +246,9 @@ def _cmd_report(args) -> int:
         print(render_run(args.run_dir))
     out = write_report(args.run_dir, args.output)
     print(f"wrote {out}")
+    if args.pareto_csv:
+        csv_out = write_pareto_csv([args.run_dir], args.pareto_csv)
+        print(f"wrote {csv_out}")
     return 0
 
 
@@ -228,6 +257,9 @@ def _cmd_compare(args) -> int:
         print(render_compare(args.baseline_dir, args.spec_dir))
     out = write_compare(args.baseline_dir, args.spec_dir, args.output)
     print(f"wrote {out}")
+    if args.pareto_csv:
+        csv_out = write_pareto_csv([args.baseline_dir, args.spec_dir], args.pareto_csv)
+        print(f"wrote {csv_out}")
     return 0
 
 
@@ -290,6 +322,7 @@ def _cmd_run(args) -> int:
         concurrency=args.concurrency,
         force=args.force,
         skip_launch_server=args.skip_launch_server,
+        skip_if_exists=args.skip_if_exists,
         server_overrides={
             "host": args.host,
             "port": args.port,

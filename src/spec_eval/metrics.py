@@ -98,10 +98,29 @@ class BenchmarkMetrics:
     # ─── Latency percentiles (from meta_info) ──────────────────────────────
     e2e_latency_p50: Optional[float] = None
     e2e_latency_p90: Optional[float] = None
+    e2e_latency_p99: Optional[float] = None
     inference_time_p50: Optional[float] = None
     queue_time_p50: Optional[float] = None
     decode_throughput_p50: Optional[float] = None
     decode_throughput_p90: Optional[float] = None
+
+    # ─── Inter-token latency (derived: inference_time / completion_tokens) ─
+    # ITL ≈ time per generated token, the right metric for streaming UX.
+    # Spec-decode often *increases* ITL even while throughput goes up (extra
+    # draft step per accept), so we report this separately from tok/s.
+    itl_ms_p50: Optional[float] = None
+    itl_ms_p90: Optional[float] = None
+    itl_ms_p99: Optional[float] = None
+
+    # ─── Bootstrap 95% CIs (percentile method, n=2000 resamples) ───────────
+    accept_length_ci: Optional[Dict[str, float]] = None
+    """``{point, lo, hi, n}`` for bootstrap 95% CI of per-prompt accept_length."""
+    output_throughput_ci: Optional[Dict[str, float]] = None
+    """``{point, lo, hi, n}`` for bootstrap 95% CI of per-prompt tok/s."""
+    accuracy_ci: Optional[Dict[str, float]] = None
+    """``{point, lo, hi, n}`` for bootstrap 95% CI of per-prompt correctness
+    (only set when the task has 0/1 per-prompt grades — most CI logic just
+    drops this when ``accuracy is None``)."""
 
     # ─── /server_info ──────────────────────────────────────────────────────
     step_time_p20_ms: Optional[float] = None
@@ -247,9 +266,27 @@ def compute_metrics(
     qtime = [r["queue_time"] for r in rows if isinstance(r.get("queue_time"), (int, float))]
     dec_tp = [r["decode_throughput"] for r in rows if isinstance(r.get("decode_throughput"), (int, float))]
 
+    # Per-prompt ITL: ms per generated token, derived from inference_time / completion_tokens.
+    # We deliberately divide INFERENCE time (excludes queue) so this measures
+    # the decode loop's per-token cost — that's the part spec-decode changes.
+    per_prompt_itl_ms: List[float] = []
+    per_prompt_throughput: List[float] = []
+    for r in rows:
+        ct = r.get("completion_tokens") or 0
+        it = r.get("inference_time")
+        if ct > 0 and isinstance(it, (int, float)) and it > 0:
+            per_prompt_itl_ms.append((it / ct) * 1000.0)
+            per_prompt_throughput.append(ct / it)
+
     effective_speed = None
     if step_time_p20_ms and step_time_p20_ms > 0:
         effective_speed = (1000.0 / step_time_p20_ms) * accept_length
+
+    # ─── Bootstrap 95% CIs ────────────────────────────────────────────────
+    # Lazy-imported to keep ``import spec_eval.metrics`` cheap.
+    from spec_eval.stats import bootstrap_ci  # noqa: PLC0415
+    accept_length_ci = bootstrap_ci(per_prompt_accept_length, stat="mean")
+    output_throughput_ci = bootstrap_ci(per_prompt_throughput, stat="mean")
 
     return BenchmarkMetrics(
         latency=latency,
@@ -277,10 +314,16 @@ def compute_metrics(
         spec_accepted_drafts_mean=drafts_mean,
         e2e_latency_p50=_percentile(e2e, 50),
         e2e_latency_p90=_percentile(e2e, 90),
+        e2e_latency_p99=_percentile(e2e, 99),
         inference_time_p50=_percentile(inf, 50),
         queue_time_p50=_percentile(qtime, 50),
         decode_throughput_p50=_percentile(dec_tp, 50),
         decode_throughput_p90=_percentile(dec_tp, 90),
+        itl_ms_p50=_percentile(per_prompt_itl_ms, 50),
+        itl_ms_p90=_percentile(per_prompt_itl_ms, 90),
+        itl_ms_p99=_percentile(per_prompt_itl_ms, 99),
+        accept_length_ci=accept_length_ci,
+        output_throughput_ci=output_throughput_ci,
         step_time_p20_ms=step_time_p20_ms,
         effective_speed_tps=effective_speed,
         total_retractions=retractions,
@@ -346,10 +389,18 @@ def print_results(
         print(f"  Step time (p20, ms)     : {m.step_time_p20_ms:.2f}")
         print(f"  Effective speed (tps)   : {m.effective_speed_tps:.2f}")
     if m.e2e_latency_p50 is not None:
-        print(f"  e2e latency p50 / p90   : {m.e2e_latency_p50:.3f}s / "
-              f"{m.e2e_latency_p90:.3f}s")
+        p99 = f" / {m.e2e_latency_p99:.3f}s" if m.e2e_latency_p99 is not None else ""
+        print(f"  e2e latency p50/p90{('/p99' if m.e2e_latency_p99 is not None else '')}    "
+              f": {m.e2e_latency_p50:.3f}s / {m.e2e_latency_p90:.3f}s{p99}")
+    if m.itl_ms_p50 is not None:
+        p99 = f" / {m.itl_ms_p99:.2f}" if m.itl_ms_p99 is not None else ""
+        print(f"  ITL ms/tok p50/p90{('/p99' if m.itl_ms_p99 is not None else '')}     "
+              f": {m.itl_ms_p50:.2f} / {m.itl_ms_p90:.2f}{p99}")
     if m.queue_time_p50 is not None and m.queue_time_p50 > 0:
         print(f"  queue time p50          : {m.queue_time_p50 * 1000:.1f} ms")
+    if m.accept_length_ci:
+        ci = m.accept_length_ci
+        print(f"  accept_length 95% CI    : [{ci['lo']:.3f}, {ci['hi']:.3f}]  (n={ci['n']})")
     if m.total_retractions:
         print(f"  ⚠ retractions           : {m.total_retractions}")
     if m.sanity and m.sanity.get("n_insane"):

@@ -120,6 +120,9 @@ class EvalConfig:
     concurrency: int = 1
     force: bool = False
     skip_launch_server: bool = False
+    skip_if_exists: bool = False
+    """If a previous run under ``output_dir`` has the same ``run_signature``
+    AND a complete ``summary.json``, return that run_dir instead of executing."""
     # full server overrides — see ServerConfig fields
     server_overrides: Dict[str, Any] = field(default_factory=dict)
 
@@ -184,6 +187,8 @@ class EvalRun:
         return "\n".join(lines[-n_lines:])
 
     def _write_config(self) -> None:
+        from spec_eval.stats import run_signature  # noqa: PLC0415
+
         drafter_sha = self._drafter_sha256(self.ec.draft)
         cfg = {
             "target": self.ec.target,
@@ -199,11 +204,13 @@ class EvalRun:
             "started_utc": _dt.datetime.utcnow().isoformat(timespec="seconds") + "Z",
             "git_sha": self._git_sha(),
         }
+        cfg["run_signature"] = run_signature(cfg)
         with open(self.run_dir / "config.json", "w") as f:
             json.dump(cfg, f, indent=2)
         if drafter_sha:
             logger.info("drafter SHA256: %s (%s/model.safetensors)",
                         drafter_sha[:16] + "…", self.ec.draft)
+        logger.info("run signature: %s", cfg["run_signature"])
 
     def _load_tokenizer(self):
         from transformers import AutoTokenizer
@@ -247,6 +254,19 @@ class EvalRun:
 
     def execute(self) -> Dict[str, Any]:
         self._write_config()
+
+        # Dedup: if a prior completed run under output_dir matches our
+        # signature, hand the caller that run instead of repeating work.
+        if self.ec.skip_if_exists:
+            prior = self._find_matching_prior_run()
+            if prior is not None:
+                logger.warning(
+                    "skip-if-exists: matching completed run at %s — not re-running",
+                    prior,
+                )
+                self.run_dir = prior
+                with open(prior / "summary.json") as f:
+                    return json.load(f)
 
         # Vocab guard once, before booting anything.
         if self.ec.draft:
@@ -396,6 +416,43 @@ class EvalRun:
     def _write_summary(self, results: Dict[str, Any]) -> None:
         with open(self.run_dir / "summary.json", "w") as f:
             json.dump(results, f, indent=2)
+
+    def _find_matching_prior_run(self) -> Optional[Path]:
+        """Walk ``output_dir`` looking for a finished run with the same
+        ``run_signature`` as ours. Returns the first match (oldest by mtime)
+        or ``None``."""
+        from spec_eval.stats import run_signature  # noqa: PLC0415
+
+        my_sig: Optional[str] = None
+        cfg_path = self.run_dir / "config.json"
+        if cfg_path.is_file():
+            with open(cfg_path) as f:
+                my_sig = json.load(f).get("run_signature")
+        if not my_sig:
+            return None
+
+        out_root = self.ec.output_dir
+        if not out_root.is_dir():
+            return None
+        candidates: List[Path] = []
+        for child in out_root.iterdir():
+            if not child.is_dir() or child == self.run_dir:
+                continue
+            cf = child / "config.json"
+            sf = child / "summary.json"
+            if not (cf.is_file() and sf.is_file()):
+                continue
+            try:
+                with open(cf) as f:
+                    sig = json.load(f).get("run_signature")
+            except Exception:  # noqa: BLE001
+                continue
+            if sig == my_sig:
+                candidates.append(child)
+        if not candidates:
+            return None
+        candidates.sort(key=lambda p: p.stat().st_mtime)
+        return candidates[0]
 
 
 # ─── Helpers used by the CLI ───────────────────────────────────────────────
