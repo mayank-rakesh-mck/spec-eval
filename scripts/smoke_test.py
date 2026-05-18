@@ -2,11 +2,17 @@
 
 Exercises:
   1. ``compute_metrics``: ratio-of-sums and mean-of-ratios derivations,
-     per-prompt distribution stats, baseline path (no spec), JSON round-trip.
+     per-prompt distribution stats, baseline path (no spec), JSON round-trip,
+     new ITL p99 + bootstrap CIs.
   2. ``_stats`` helper shape matches the old eval.py.
   3. ``EvalRun._drafter_sha256`` and ``EvalRun._log_tail`` on real files.
   4. ``sanity_flags`` flag taxonomy.
-  5. Report rendering of a fake summary (markdown well-formed).
+  5. Report rendering of a fake summary (markdown well-formed, ITL block
+     present, bootstrap CI column present, Pareto CSV writer works).
+  6. ``stats``: bootstrap CI shape, paired Wilcoxon direction, geomean /
+     harmean correctness, run_signature determinism.
+  7. ``ops``: doctor returns structured results, status renderer detects
+     state, run signature comparison works.
 
 Runs in <1 s, no GPU, no SGLang. Exit non-zero on any assertion failure.
 
@@ -206,6 +212,203 @@ def test_render_run() -> None:
     print("  ✓ render_run includes all new sections")
 
 
+def test_metrics_new_fields() -> None:
+    """ITL p99 + bootstrap CI fields populate when there's enough signal."""
+    from spec_eval.metrics import compute_metrics
+
+    rows = []
+    for i in range(50):
+        rows.append({
+            "completion_tokens": 100 + i,
+            "spec_verify_ct": 30 + (i % 5),
+            "prompt_tokens": 50,
+            "cached_tokens": 10,
+            "spec_accept_token_num": 80 + i,
+            "spec_draft_token_num": 200,
+            "spec_accept_rate": 0.6,
+            "spec_accept_histogram": [10, 5, 3, 2, 1],
+            "e2e_latency": 1.0 + i * 0.02,
+            "inference_time": 0.9 + i * 0.018,
+            "queue_time": 0.05,
+            "decode_throughput": 200 - i,
+            "total_retractions": 0,
+        })
+    m = compute_metrics(rows, latency=10.0, num_steps=5, step_time_p20_ms=4.5)
+    assert m.e2e_latency_p99 is not None
+    assert m.itl_ms_p50 is not None and m.itl_ms_p99 >= m.itl_ms_p50
+    assert m.accept_length_ci is not None
+    assert m.accept_length_ci["lo"] <= m.accept_length_ci["point"] <= m.accept_length_ci["hi"]
+    assert m.output_throughput_ci is not None
+    print("  ✓ ITL p50/p90/p99 + bootstrap CIs populate on N=50")
+
+
+def test_stats_module() -> None:
+    """The new spec_eval.stats helpers: bootstrap_ci, paired_wilcoxon, etc."""
+    import random
+    from spec_eval.stats import (
+        bootstrap_ci, geomean, harmean, paired_wilcoxon, run_signature,
+    )
+
+    random.seed(0)
+    xs = [random.gauss(0.0, 1.0) for _ in range(200)]
+    ci = bootstrap_ci(xs, stat="mean")
+    assert set(ci) == {"point", "lo", "hi", "n", "stat", "confidence"}
+    assert ci["lo"] < ci["point"] < ci["hi"]
+    assert ci["n"] == 200
+    # tiny samples ⇒ None
+    assert bootstrap_ci([1.0, 2.0]) is None
+
+    # paired Wilcoxon: x clearly > y
+    fast = [random.gauss(10.0, 2.0) for _ in range(40)]
+    slow = [random.gauss(6.0, 2.0) for _ in range(40)]
+    w = paired_wilcoxon(fast, slow)
+    assert w["p_value"] < 1e-5
+    assert w["effect_direction"] == "x > y"
+    assert w["median_delta"] > 0
+    # tie path: both samples identical ⇒ all diffs zero ⇒ None
+    assert paired_wilcoxon([1.0] * 30, [1.0] * 30) is None
+
+    # geomean / harmean exact answers
+    assert abs(geomean([1, 2, 4, 8]) - (1 * 2 * 4 * 8) ** 0.25) < 1e-9
+    assert abs(harmean([1, 2, 4, 8]) - 4 / (1 + 0.5 + 0.25 + 0.125)) < 1e-9
+    assert geomean([]) is None and harmean([]) is None
+    assert geomean([0, -1]) is None  # filters non-positive
+
+    # run_signature is deterministic and exclusively depends on the keys we care about
+    cfg = {"target": "a", "draft": "b", "drafter_sha256": "x" * 16,
+           "algorithm": "EAGLE", "tasks": ["t1", "t2"],
+           "cell_configs": [{"bs": 1, "num_steps": 5}], "seeds": [42],
+           "num_samples_default": 50}
+    s1 = run_signature(cfg)
+    s2 = run_signature({**cfg, "started_utc": "irrelevant", "git_sha": "noise"})
+    s3 = run_signature({**cfg, "seeds": [43]})  # actual change
+    assert s1 == s2, "ignored fields must not change the signature"
+    assert s1 != s3, "seeds must affect signature"
+    assert len(s1) == 12
+    print("  ✓ stats: bootstrap CI, paired Wilcoxon, geomean/harmean, run_signature")
+
+
+def test_ops_status() -> None:
+    """`spec-eval status` snapshot detects completed / in-flight / finished."""
+    from spec_eval.ops import _scan_run_dir, render_status
+
+    with tempfile.TemporaryDirectory() as td:
+        run = Path(td) / "demo"
+        run.mkdir()
+        (run / "config.json").write_text(json.dumps({
+            "target": "t", "draft": "d", "algorithm": "EAGLE",
+            "tasks": ["humaneval", "gsm8k", "simpleqa", "mtbench"],
+            "cell_configs": [{"bs": 1}],
+            "seeds": [42], "num_samples_default": 50, "concurrency": 1,
+            "server_overrides": {}, "drafter_sha256": None,
+            "started_utc": "2026-05-18T10:00:00Z", "run_signature": "x" * 12,
+        }))
+        cell = run / "bs1_cellA"
+        cell.mkdir()
+        (cell / "cell.json").write_text("{}")
+        for done in ("humaneval", "gsm8k"):
+            (cell / done).mkdir()
+            (cell / done / "metrics.json").write_text("{}")
+        (cell / "simpleqa").mkdir()
+        (cell / "simpleqa" / "requests.jsonl").write_text("{}\n")
+
+        snap = _scan_run_dir(run)
+        assert snap["state"] == "running"
+        assert len(snap["completed"]) == 2
+        assert len(snap["in_flight"]) == 1
+        md = render_status(run)
+        assert "running" in md and "In-flight" in md
+
+        # Mark finished — now state should flip.
+        (run / "summary.json").write_text("{}")
+        snap = _scan_run_dir(run)
+        assert snap["state"] == "finished"
+    print("  ✓ ops.status detects running/finished + counts task cells")
+
+
+def test_ops_doctor() -> None:
+    """Doctor returns structured CheckResults; ports & disk should pass locally."""
+    from spec_eval.ops import run_doctor
+
+    with tempfile.TemporaryDirectory() as td:
+        results, _ = run_doctor(port=0, output_dir=Path(td))
+        names = {r.name for r in results}
+        for required in ("python >= 3.10", "numpy", "httpx", "transformers",
+                         "datasets", "port 0 free"):
+            assert required in names, f"missing doctor check {required!r}"
+        # disk check on tempdir should pass
+        disk = next(r for r in results if r.name.startswith("disk free under"))
+        assert disk.ok, f"disk check unexpectedly failed: {disk.detail}"
+    print("  ✓ ops.doctor returns structured CheckResults")
+
+
+def test_pareto_csv() -> None:
+    """write_pareto_csv emits one row per (run, cell, task)."""
+    import csv as _csv
+    from spec_eval.report import write_pareto_csv
+
+    with tempfile.TemporaryDirectory() as td:
+        run = Path(td) / "r1"
+        run.mkdir()
+        (run / "summary.json").write_text(json.dumps({
+            "cells": {
+                "cellA": {"tasks": {
+                    "humaneval": {"accept_length": 4.1, "output_throughput": 250.0,
+                                  "accuracy": 0.7, "itl_ms_p50": 4.0,
+                                  "alpha_per_token": 0.62, "spec_decode_active": True},
+                    "gsm8k":     {"accept_length": 3.8, "output_throughput": 200.0,
+                                  "accuracy": 0.55, "itl_ms_p50": 5.0,
+                                  "alpha_per_token": 0.56, "spec_decode_active": True},
+                }},
+            }
+        }))
+        out_csv = Path(td) / "pareto.csv"
+        write_pareto_csv([run], out_csv)
+        with open(out_csv) as f:
+            reader = list(_csv.DictReader(f))
+        assert len(reader) == 2
+        assert {r["task"] for r in reader} == {"humaneval", "gsm8k"}
+        assert all(r["run"] == "r1" for r in reader)
+    print("  ✓ write_pareto_csv emits one row per (run, cell, task)")
+
+
+def test_compare_paired_wilcoxon() -> None:
+    """`render_compare` finds requests.jsonl rows and emits the Wilcoxon block."""
+    from spec_eval.report import render_compare
+
+    def _mk_run(td: Path, name: str, mean_itime: float) -> Path:
+        run = td / name
+        run.mkdir()
+        (run / "config.json").write_text("{}")
+        (run / "summary.json").write_text(json.dumps({
+            "cells": {"cellA": {"tasks": {"humaneval": {
+                "output_throughput": 100.0 / mean_itime,
+                "accept_length": 1.0, "spec_decode_active": False,
+                "num_questions": 30,
+            }}}}
+        }))
+        cell = run / "cellA"; cell.mkdir()
+        task = cell / "humaneval"; task.mkdir()
+        rows = []
+        for i in range(30):
+            rows.append({"completion_tokens": 100,
+                         "inference_time": mean_itime + 0.01 * i})
+        (task / "requests.jsonl").write_text(
+            "\n".join(json.dumps(r) for r in rows) + "\n"
+        )
+        return run
+
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        base = _mk_run(td, "baseline", mean_itime=1.0)
+        spec = _mk_run(td, "spec", mean_itime=0.5)  # 2× faster ⇒ spec > baseline
+        md = render_compare(base, spec)
+        assert "Paired Wilcoxon" in md
+        # spec is faster ⇒ median delta positive ⇒ direction "x > y"
+        assert "x > y" in md
+    print("  ✓ render_compare emits paired Wilcoxon block on requests.jsonl pairs")
+
+
 def main() -> int:
     _add_src_to_path()
     print("spec-eval offline smoke test")
@@ -215,6 +418,12 @@ def main() -> int:
     test_drafter_sha256_and_log_tail()
     test_sanity_flags()
     test_render_run()
+    test_metrics_new_fields()
+    test_stats_module()
+    test_ops_status()
+    test_ops_doctor()
+    test_pareto_csv()
+    test_compare_paired_wilcoxon()
     print("─" * 50)
     print("ALL SMOKE TESTS PASSED")
     return 0

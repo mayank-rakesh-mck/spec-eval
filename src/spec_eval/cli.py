@@ -6,6 +6,8 @@ Subcommands
   report      Render a markdown report from a finished run dir.
   compare     Side-by-side diff of two runs (baseline vs spec-decode).
   audit       Inspect a draft model (vocab, algorithm, defaults).
+  doctor      Preflight environment health check (Python, CUDA, sglang, ports).
+  status      Snapshot a run-dir's progress (in-flight cells, ETA hints).
   list-tasks  Print known benchmark names.
 """
 
@@ -20,6 +22,7 @@ from typing import Any, Dict, List, Optional
 
 from spec_eval.algo_detect import defaults_for, detect_algorithm
 from spec_eval.guards import vocab_guard
+from spec_eval.ops import render_status, run_doctor
 from spec_eval.registry import BENCHMARKS
 from spec_eval.report import (
     render_compare,
@@ -177,6 +180,28 @@ def _build_parser() -> argparse.ArgumentParser:
     aud_p.add_argument("--draft", default=None)
     _add_common_logging(aud_p)
 
+    # doctor — environment health check
+    doc_p = sub.add_parser("doctor", help="preflight environment health check (no GPU work)")
+    doc_p.add_argument("--port", type=int, default=30000, help="port we'd boot sglang on")
+    doc_p.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("results"),
+        help="dir to disk-free-check",
+    )
+    doc_p.add_argument(
+        "--json",
+        action="store_true",
+        help="emit machine-readable JSON instead of human text",
+    )
+    _add_common_logging(doc_p)
+
+    # status — snapshot of a run dir
+    sta_p = sub.add_parser("status", help="snapshot a run-dir's progress")
+    sta_p.add_argument("run_dir", type=Path)
+    sta_p.add_argument("--json", action="store_true", help="emit machine-readable JSON")
+    _add_common_logging(sta_p)
+
     # list-tasks
     sub.add_parser("list-tasks", help="print known benchmark names")
     return p
@@ -218,6 +243,12 @@ def main(argv: List[str] | None = None) -> int:
     if args.cmd == "compare":
         return _cmd_compare(args)
 
+    if args.cmd == "doctor":
+        return _cmd_doctor(args)
+
+    if args.cmd == "status":
+        return _cmd_status(args)
+
     if args.cmd == "run":
         return _cmd_run(args)
 
@@ -249,6 +280,40 @@ def _cmd_report(args) -> int:
     if args.pareto_csv:
         csv_out = write_pareto_csv([args.run_dir], args.pareto_csv)
         print(f"wrote {csv_out}")
+    return 0
+
+
+def _cmd_doctor(args) -> int:
+    results, rc = run_doctor(port=args.port, output_dir=args.output_dir)
+    if args.json:
+        print(json.dumps(
+            [{"name": r.name, "ok": r.ok, "detail": r.detail, "hint": r.hint}
+             for r in results],
+            indent=2,
+        ))
+        return rc
+    print("spec-eval doctor")
+    print()
+    for r in results:
+        print(r.render())
+    print()
+    fails = [r for r in results if not r.ok]
+    if fails:
+        print(f"  {len(fails)} check(s) failed.")
+    else:
+        print("  all checks passed.")
+    return rc
+
+
+def _cmd_status(args) -> int:
+    if not args.run_dir.is_dir():
+        print(f"error: {args.run_dir} is not a directory", file=sys.stderr)
+        return 2
+    if args.json:
+        from spec_eval.ops import _scan_run_dir  # noqa: PLC0415
+        print(json.dumps(_scan_run_dir(args.run_dir), indent=2))
+        return 0
+    print(render_status(args.run_dir))
     return 0
 
 
@@ -347,3 +412,7 @@ def _cmd_run(args) -> int:
         print(f"\nrun complete; results in: {run.run_dir} (report failed: {e})")
 
     return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

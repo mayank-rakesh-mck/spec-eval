@@ -42,8 +42,8 @@ EAGLE3_TUPLE ?= 1,3,1,4
 BASELINE_TUPLE ?= 1,0,0,0
 
 .DEFAULT_GOAL := help
-.PHONY: help setup install-sglang cuda-env list-tasks audit \
-        run-baseline run-eagle2 run-eagle3 run-sweep \
+.PHONY: help setup install-sglang cuda-env doctor list-tasks audit status \
+        run-baseline run-eagle2 run-eagle3 run-sweep run-tree-sweep run-bs-sweep \
         report compare smoke-test lint typecheck clean clean-results
 
 help:  ## Show this help.
@@ -132,16 +132,67 @@ run-sweep:  ## Sweep baseline + EAGLE-2 + EAGLE-3 trees in one boot. Vars: TARGE
 	  --output-dir "$(OUTPUT_DIR)" $(if $(RUN_NAME),--run-name "$(RUN_NAME)",) \
 	  $(EXTRA_ARGS)
 
+# ─── Sweep helpers (tree topology + batch size) ────────────────────────────
+#
+# Each sweep cell forces SGLang to be rebooted (cell-specific spec config),
+# so these targets stay inside one CLI invocation that does the booting for
+# us. Override TREE_TUPLES / BS_TUPLES on the command line to customise the
+# grid without editing the file:
+#
+#   make run-tree-sweep TREE_TUPLES="1,3,4,16 1,5,4,32 1,5,8,64 1,7,8,64"
+#   make run-bs-sweep   BS_TUPLES="1,5,8,64 2,5,8,64 4,5,8,64 8,5,8,64"
+#
+# Tuple format is the SpecForge convention: ``batch_size,num_steps,topk,draft_tokens``.
+# A baseline cell is `bs,0,0,0` — include one if you want it in the same run.
+
+# Default tree-topology grid: span the (num_steps × topk × draft_tokens) space
+# people actually care about for EAGLE-2. Edit / pass TREE_TUPLES to taste.
+TREE_TUPLES ?= 1,3,4,16  1,5,4,32  1,5,8,64  1,7,8,64  1,5,16,128
+
+# Default batch-size grid: 1, 2, 4, 8 at the EAGLE-2 default tree.
+BS_TUPLES ?= 1,5,8,64  2,5,8,64  4,5,8,64  8,5,8,64
+
+run-tree-sweep:  ## Sweep EAGLE-2 tree topology (steps × topk × draft_tokens). Vars: TARGET, DRAFT, TREE_TUPLES
+	$(WITH_CUDA) $(UV) run spec-eval run \
+	  --target "$(TARGET)" --draft "$(DRAFT)" \
+	  --algorithm EAGLE \
+	  --config-list $(TREE_TUPLES) \
+	  --tasks "$(TASKS)" --num-samples "$(N)" \
+	  --seeds "$(SEEDS)" --concurrency "$(CONCURRENCY)" \
+	  --output-dir "$(OUTPUT_DIR)" $(if $(RUN_NAME),--run-name "$(RUN_NAME)",) \
+	  $(EXTRA_ARGS)
+
+run-bs-sweep:  ## Sweep per-batch-size at the EAGLE-2 default tree. Vars: TARGET, DRAFT, BS_TUPLES
+	$(WITH_CUDA) $(UV) run spec-eval run \
+	  --target "$(TARGET)" --draft "$(DRAFT)" \
+	  --algorithm EAGLE \
+	  --config-list $(BS_TUPLES) \
+	  --tasks "$(TASKS)" --num-samples "$(N)" \
+	  --seeds "$(SEEDS)" --concurrency "$(CONCURRENCY)" \
+	  --output-dir "$(OUTPUT_DIR)" $(if $(RUN_NAME),--run-name "$(RUN_NAME)",) \
+	  $(EXTRA_ARGS)
+
 # ─── Reports ───────────────────────────────────────────────────────────────
 
-report:  ## Render markdown for a finished run. Vars: RUN_DIR
+report:  ## Render markdown for a finished run. Vars: RUN_DIR [, PARETO_CSV]
 	@if [ -z "$(RUN_DIR)" ]; then echo "RUN_DIR is required"; exit 2; fi
-	$(UV) run spec-eval report "$(RUN_DIR)" --print
+	$(UV) run spec-eval report "$(RUN_DIR)" --print \
+	  $(if $(PARETO_CSV),--pareto-csv "$(PARETO_CSV)",)
 
-compare:  ## Diff baseline vs spec run. Vars: BASELINE_DIR, SPEC_DIR
+compare:  ## Diff baseline vs spec run. Vars: BASELINE_DIR, SPEC_DIR [, PARETO_CSV]
 	@if [ -z "$(BASELINE_DIR)" ] || [ -z "$(SPEC_DIR)" ]; then \
 	    echo "BASELINE_DIR and SPEC_DIR are required"; exit 2; fi
-	$(UV) run spec-eval compare "$(BASELINE_DIR)" "$(SPEC_DIR)" --print
+	$(UV) run spec-eval compare "$(BASELINE_DIR)" "$(SPEC_DIR)" --print \
+	  $(if $(PARETO_CSV),--pareto-csv "$(PARETO_CSV)",)
+
+# ─── Ops UX ────────────────────────────────────────────────────────────────
+
+doctor:  ## Preflight env health check (Python, CUDA, sglang, ports, disk).
+	$(WITH_CUDA) $(UV) run spec-eval doctor
+
+status:  ## Print snapshot progress of a run dir. Vars: RUN_DIR
+	@if [ -z "$(RUN_DIR)" ]; then echo "RUN_DIR is required"; exit 2; fi
+	$(UV) run spec-eval status "$(RUN_DIR)"
 
 # ─── Dev: tests + hygiene ──────────────────────────────────────────────────
 
