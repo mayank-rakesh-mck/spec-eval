@@ -92,6 +92,17 @@ def _add_run_args(p: argparse.ArgumentParser) -> None:
     server.add_argument("--trust-remote-code", action="store_true")
     server.add_argument("--attention-backend", default=None, help="e.g. fa3")
     server.add_argument("--cuda-graph-max-bs", type=int, default=None)
+    server.add_argument(
+        "--no-enable-metrics",
+        dest="enable_metrics",
+        action="store_false",
+        default=True,
+        help=(
+            "skip the SGLang --enable-metrics flag. ONLY use for A/B perf "
+            "measurement of the metrics-collector overhead itself; without it "
+            "you lose inference_time / queue_time / decode_throughput / ITL."
+        ),
+    )
     server.add_argument("--skip-launch-server", action="store_true")
     server.add_argument("--extra-arg", action="append", default=[])
 
@@ -398,6 +409,7 @@ def _cmd_run(args) -> int:
             "trust_remote_code": args.trust_remote_code,
             "attention_backend": args.attention_backend,
             "cuda_graph_max_bs": args.cuda_graph_max_bs,
+            "enable_metrics": args.enable_metrics,
             "extra_args": list(args.extra_arg),
         },
     )

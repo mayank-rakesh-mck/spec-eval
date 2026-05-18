@@ -239,7 +239,32 @@ def test_metrics_new_fields() -> None:
     assert m.accept_length_ci is not None
     assert m.accept_length_ci["lo"] <= m.accept_length_ci["point"] <= m.accept_length_ci["hi"]
     assert m.output_throughput_ci is not None
+    assert m.itl_used_e2e_fallback == 0  # inference_time was present
     print("  ✓ ITL p50/p90/p99 + bootstrap CIs populate on N=50")
+
+
+def test_metrics_itl_fallback() -> None:
+    """When SGLang is booted without --enable-metrics, only e2e_latency is in
+    meta_info. ITL must still populate (falling back to e2e_latency) and the
+    fallback counter must record it so reports can flag the over-count."""
+    from spec_eval.metrics import compute_metrics
+
+    rows = [{
+        "completion_tokens": 100, "spec_verify_ct": 30, "prompt_tokens": 50,
+        "cached_tokens": 0, "spec_accept_token_num": 80,
+        "spec_draft_token_num": 200, "spec_accept_rate": 0.6,
+        "spec_accept_histogram": [5, 2, 1, 1],
+        "e2e_latency": 1.0,                # only this — like a no-flag run
+        "inference_time": None, "queue_time": None, "decode_throughput": None,
+        "total_retractions": 0,
+    } for _ in range(20)]
+    m = compute_metrics(rows, latency=20.0, num_steps=5)
+    assert m.itl_ms_p50 is not None, "ITL fallback should produce a value"
+    assert m.itl_used_e2e_fallback == 20, \
+        f"all 20 rows should have hit the fallback, got {m.itl_used_e2e_fallback}"
+    assert m.output_throughput_ci is not None, \
+        "throughput CI should still populate from the fallback denom"
+    print("  ✓ ITL falls back to e2e_latency when inference_time is absent")
 
 
 def test_stats_module() -> None:
@@ -419,6 +444,7 @@ def main() -> int:
     test_sanity_flags()
     test_render_run()
     test_metrics_new_fields()
+    test_metrics_itl_fallback()
     test_stats_module()
     test_ops_status()
     test_ops_doctor()

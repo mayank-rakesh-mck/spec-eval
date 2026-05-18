@@ -112,6 +112,12 @@ class BenchmarkMetrics:
     itl_ms_p90: Optional[float] = None
     itl_ms_p99: Optional[float] = None
 
+    itl_used_e2e_fallback: int = 0
+    """How many rows used ``e2e_latency`` instead of ``inference_time`` as the
+    ITL denominator. Non-zero ⇒ SGLang server was launched without
+    ``--enable-metrics`` (we now pass it by default) — ITL is over-counted by
+    the queue-time component, treat the headline as an *upper bound*."""
+
     # ─── Bootstrap 95% CIs (percentile method, n=2000 resamples) ───────────
     accept_length_ci: Optional[Dict[str, float]] = None
     """``{point, lo, hi, n}`` for bootstrap 95% CI of per-prompt accept_length."""
@@ -266,17 +272,26 @@ def compute_metrics(
     qtime = [r["queue_time"] for r in rows if isinstance(r.get("queue_time"), (int, float))]
     dec_tp = [r["decode_throughput"] for r in rows if isinstance(r.get("decode_throughput"), (int, float))]
 
-    # Per-prompt ITL: ms per generated token, derived from inference_time / completion_tokens.
-    # We deliberately divide INFERENCE time (excludes queue) so this measures
-    # the decode loop's per-token cost — that's the part spec-decode changes.
+    # Per-prompt ITL: ms per generated token. Prefer inference_time (pure
+    # compute, excludes queue) since that's the part spec-decode actually
+    # changes; fall back to e2e_latency when SGLang was launched without
+    # --enable-metrics (older 0.5.x default). The fallback over-counts queue
+    # time, so ITL will be conservatively *higher* — annotated downstream.
     per_prompt_itl_ms: List[float] = []
     per_prompt_throughput: List[float] = []
+    itl_fallback_count = 0
     for r in rows:
         ct = r.get("completion_tokens") or 0
-        it = r.get("inference_time")
-        if ct > 0 and isinstance(it, (int, float)) and it > 0:
-            per_prompt_itl_ms.append((it / ct) * 1000.0)
-            per_prompt_throughput.append(ct / it)
+        if ct <= 0:
+            continue
+        denom = r.get("inference_time")
+        if not isinstance(denom, (int, float)) or denom <= 0:
+            denom = r.get("e2e_latency")
+            if isinstance(denom, (int, float)) and denom > 0:
+                itl_fallback_count += 1
+        if isinstance(denom, (int, float)) and denom > 0:
+            per_prompt_itl_ms.append((denom / ct) * 1000.0)
+            per_prompt_throughput.append(ct / denom)
 
     effective_speed = None
     if step_time_p20_ms and step_time_p20_ms > 0:
@@ -322,6 +337,7 @@ def compute_metrics(
         itl_ms_p50=_percentile(per_prompt_itl_ms, 50),
         itl_ms_p90=_percentile(per_prompt_itl_ms, 90),
         itl_ms_p99=_percentile(per_prompt_itl_ms, 99),
+        itl_used_e2e_fallback=itl_fallback_count,
         accept_length_ci=accept_length_ci,
         output_throughput_ci=output_throughput_ci,
         step_time_p20_ms=step_time_p20_ms,

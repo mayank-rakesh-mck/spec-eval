@@ -239,6 +239,7 @@ class EvalRun:
             trust_remote_code=ov.get("trust_remote_code", False),
             attention_backend=ov.get("attention_backend"),
             cuda_graph_max_bs=ov.get("cuda_graph_max_bs", cell.bs if cell.bs > 1 else None),
+            enable_metrics=ov.get("enable_metrics", True),
             extra_env=env,
             extra_args=list(ov.get("extra_args", [])),
             spec=SpecConfig(

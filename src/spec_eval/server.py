@@ -44,6 +44,16 @@ class ServerConfig:
     trust_remote_code: bool = False
     attention_backend: Optional[str] = None  # e.g. "fa3"
     cuda_graph_max_bs: Optional[int] = None
+    enable_metrics: bool = True
+    """SGLang gates per-request ``inference_time`` / ``queue_time`` /
+    ``decode_throughput`` on ``--enable-metrics`` (see
+    ``srt/observability/req_time_stats.py::convert_to_output_meta_info``
+    and ``srt/managers/scheduler.py`` — ``time_stats.set_metrics_collector``
+    is only called when ``self.enable_metrics`` is True). Without the flag
+    we get ``e2e_latency`` only, which kills our ITL p50/p90/p99 metric and
+    degrades the paired Wilcoxon in ``compare``. Also exposes
+    ``GET /metrics`` (Prometheus), which is harmless. Set to ``False`` only
+    if you have a benchmark explicitly measuring metrics-collector overhead."""
     extra_env: Dict[str, str] = field(default_factory=dict)
     extra_args: List[str] = field(default_factory=list)
     spec: SpecConfig = field(default_factory=SpecConfig)
@@ -86,6 +96,8 @@ def build_launch_cmd(cfg: ServerConfig) -> List[str]:
         cmd += ["--attention-backend", cfg.attention_backend]
     if cfg.cuda_graph_max_bs is not None:
         cmd += ["--cuda-graph-max-bs", str(cfg.cuda_graph_max_bs)]
+    if cfg.enable_metrics:
+        cmd += ["--enable-metrics"]
     if cfg.draft:
         cmd += [
             "--speculative-algorithm",

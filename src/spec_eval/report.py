@@ -438,13 +438,23 @@ def _load_request_rows(run_dir: Path) -> Dict[str, List[Dict[str, Any]]]:
 
 
 def _per_prompt_throughput(rows: List[Dict[str, Any]]) -> List[float]:
-    """Recover per-prompt tok/s from ``requests.jsonl`` rows."""
+    """Recover per-prompt tok/s from ``requests.jsonl`` rows.
+
+    Prefer ``inference_time`` (server's pure-compute number, excludes queue);
+    fall back to ``e2e_latency`` when SGLang was launched without
+    ``--enable-metrics``. The fallback over-counts queue time but is
+    monotone in the same direction, so paired tests are still meaningful.
+    """
     out: List[float] = []
     for r in rows:
         ct = r.get("completion_tokens") or 0
-        it = r.get("inference_time")
-        if ct > 0 and isinstance(it, (int, float)) and it > 0:
-            out.append(ct / it)
+        if ct <= 0:
+            continue
+        denom = r.get("inference_time")
+        if not isinstance(denom, (int, float)) or denom <= 0:
+            denom = r.get("e2e_latency")
+        if isinstance(denom, (int, float)) and denom > 0:
+            out.append(ct / denom)
     return out
 
 
