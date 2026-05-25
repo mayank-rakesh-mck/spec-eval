@@ -2,10 +2,7 @@
 
 EAGLE-2 / **EAGLE-3** speculative-decoding eval pipeline for **SGLang**, managed with **UV**.
 
-Mirrors the [SpecForge benchmarker](https://github.com/sgl-project/SpecForge/tree/main/benchmarks/benchmarker)
-layout (base class + registry + per-dataset modules), but talks to SGLang over
-HTTP `/generate` so the eval venv stays lean — no `import sglang` in the eval
-code, just a subprocess that runs `python -m sglang.launch_server`.
+
 
 For each (task × spec-config × seed) cell the pipeline reports:
 
